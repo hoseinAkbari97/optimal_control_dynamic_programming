@@ -1,6 +1,6 @@
 import numpy as np
+import csv
 from collections import defaultdict
-import openpyxl
 
 # -----------------------------
 # Discretization of state/control
@@ -126,11 +126,10 @@ def solve_dp(x_step=0.5, u_step=0.5, N=2, T=2.0):
     }
 
 # -----------------------------
-# Export to Excel
+# Export all steps into a single CSV
 # -----------------------------
 
-def export_to_excel(result, filename="dp_solution.xlsx"):
-    wb = openpyxl.Workbook()
+def export_to_single_csv(result, filename="dp_solution.csv"):
     x_vals = result['x_vals']
     u_vals = result['u_vals']
     J = result['J']
@@ -138,36 +137,32 @@ def export_to_excel(result, filename="dp_solution.xlsx"):
     details = result['details']
     N = result['N']
 
-    for k in range(N - 1, -1, -1):
-        ws = wb.create_sheet(title=f"Step_{k}")
-        ws.append(["x", "u", "x_next", "immediate_cost", "next_cost", "total_cost", "j*", "u*"])
-        for i, x in enumerate(x_vals):
-            opts = details[k].get(i, [])
-            jstar = J[k, i]
-            u_idx = pi[k, i]
-            ustar = u_vals[u_idx] if u_idx >= 0 else None
-            if not opts:
-                ws.append([x, None, None, None, None, None, jstar, ustar])
-            else:
-                for o in opts:
-                    ws.append([
-                        x,
-                        o['u'],
-                        o['x_next'],
-                        o['immediate_cost'],
-                        o['next_cost'],
-                        o['total_cost'],
-                        jstar,
-                        ustar
-                    ])
+    with open(filename, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Step", "x", "u", "x_next", "immediate_cost", "next_cost", "total_cost", "j*", "u*"])
 
-    # remove default sheet
-    if "Sheet" in wb.sheetnames:
-        std = wb["Sheet"]
-        wb.remove(std)
-
-    wb.save(filename)
-    print(f"DP solution exported to {filename}")
+        for k in range(N - 1, -1, -1):
+            for i, x in enumerate(x_vals):
+                opts = details[k].get(i, [])
+                jstar = J[k, i]
+                u_idx = pi[k, i]
+                ustar = u_vals[u_idx] if u_idx >= 0 else None
+                if not opts:
+                    writer.writerow([k, x, None, None, None, None, None, jstar, ustar])
+                else:
+                    for o in opts:
+                        writer.writerow([
+                            k,
+                            x,
+                            o['u'],
+                            o['x_next'],
+                            o['immediate_cost'],
+                            o['next_cost'],
+                            o['total_cost'],
+                            jstar,
+                            ustar
+                        ])
+    print(f"All steps exported to {filename}")
 
 # -----------------------------
 # CLI demo
@@ -178,4 +173,4 @@ if __name__ == "__main__":
     N = int(input("Enter number of steps N (e.g. 4): "))
 
     result = solve_dp(x_step=x_step, u_step=u_step, N=N, T=2.0)
-    export_to_excel(result, filename="dp_solution.xlsx")
+    export_to_single_csv(result, filename="dp_solution.csv")
