@@ -1,6 +1,8 @@
 import numpy as np
 import csv
 from collections import defaultdict
+import os
+import matplotlib.pyplot as plt
 
 # -----------------------------
 # Discretization of state/control
@@ -30,7 +32,6 @@ def make_time_grid(N, T=2.0):
 def build_x_index(x_vals, tol=1e-9):
     return {round(float(v), 10): i for i, v in enumerate(x_vals)}
 
-
 def find_bracketing_indices(x_next, x_vals):
     for j in range(len(x_vals) - 1):
         if x_vals[j] < x_next < x_vals[j + 1]:
@@ -38,10 +39,8 @@ def find_bracketing_indices(x_next, x_vals):
     return None, None
 
 # Costs
-
 def stage_cost(u_k):
     return 2.0 * (u_k ** 2)
-
 
 def terminal_step_cost(x_next, u_last):
     return (x_next ** 2) + 2.0 * (u_last ** 2)
@@ -78,7 +77,7 @@ def solve_dp(x_step=0.5, u_step=0.5, N=2, T=2.0):
                     j_low, j_up = find_bracketing_indices(x_next, x_vals)
                     if j_low is None:
                         continue
-                    next_cost = 0.5 * (J[k, j_up] + J[k, j_low])  # placeholder, not used in terminal but for consistency
+                    next_cost = 0.5 * (J[k, j_up] + J[k, j_low])
                     interpolated = True
 
                 total = terminal_step_cost(x_next, u)
@@ -194,6 +193,118 @@ def export_to_single_csv(result):
                             "yes" if o['interpolated'] else "no"
                         ])
     print(f"All steps exported to {filename}")
+    return filename
+
+# -----------------------------
+# Load result from CSV
+# -----------------------------
+
+def load_result_from_csv(filename):
+    with open(filename, newline='') as file:
+        reader = csv.DictReader(file)
+        rows = list(reader)
+
+    N = max(int(r["Step"]) for r in rows) + 1
+    x_vals = sorted(set(float(r["x"]) for r in rows if r["x"] != ''))
+    u_vals = sorted(set(float(r["u"]) for r in rows if r["u"] not in (None, '', 'None')))
+
+    return {
+        "rows": rows,
+        "N": N,
+        "x_vals": np.array(x_vals),
+        "u_vals": np.array(u_vals)
+    }
+
+# -----------------------------
+# Reconstruct optimal trajectories
+# -----------------------------
+
+def reconstruct_trajectories(result, x0):
+    x_vals = result["x_vals"]
+    u_vals = result["u_vals"]
+    N = result["N"]
+    rows = result["rows"]
+
+    x_index_map = build_x_index(x_vals)
+
+    if round(float(x0), 10) not in x_index_map:
+        return []
+
+    def recurse(step, x_curr, cost_so_far):
+        if step >= N:
+            return [([x_curr], [], [cost_so_far])]
+
+        candidates = [r for r in rows if int(r["Step"]) == step and float(r["x"]) == round(float(x_curr), 10)]
+        opt_candidates = [r for r in candidates if r["u*"] not in ('', None)]
+
+        if not opt_candidates:
+            return []
+
+        trajectories = []
+        for r in opt_candidates:
+            u = float(r["u*"])
+            x_next = float(r["x_next"])
+            immediate = float(r["immediate_cost"])
+            total_cost = cost_so_far + immediate
+            suffixes = recurse(step + 1, x_next, total_cost)
+            for xs, us, cs in suffixes:
+                trajectories.append(([x_curr] + xs, [u] + us, [cost_so_far] + cs))
+        return trajectories
+
+    return recurse(0, x0, 0.0)
+
+# -----------------------------
+# Show trajectories in terminal + plots
+# -----------------------------
+
+def show_trajectories(result, x0):
+    trajectories = reconstruct_trajectories(result, x0)
+
+    if not trajectories:
+        print(f"No feasible trajectory from x0={x0}")
+        return
+
+    print(f"\nOptimal trajectories starting from x0={x0}:\n")
+
+    n_traj = len(trajectories)
+    fig, axes = plt.subplots(n_traj, 3, figsize=(12, 4 * n_traj))
+
+    if n_traj == 1:
+        axes = np.array([axes])  # ensure axes is 2D
+
+    for idx, (xs, us, cs) in enumerate(trajectories):
+        print(f"Trajectory {idx+1}:")
+        print(f"  States: {xs}")
+        print(f"  Controls: {us}")
+        print(f"  Total Cost: {cs[-1]:.6f}")
+
+        steps_x = list(range(len(xs)))
+        steps_u = list(range(len(us)))
+        steps_j = list(range(len(cs)))
+
+        # X trajectory (step plot)
+        axes[idx, 0].step(steps_x, xs, where="post", marker="o")
+        axes[idx, 0].set_title(f"Trajectory {idx+1} - States")
+        axes[idx, 0].set_xlabel("Step")
+        axes[idx, 0].set_ylabel("x")
+        axes[idx, 0].grid(True)
+
+        # U trajectory (step plot)
+        axes[idx, 1].step(steps_u, us, where="post", marker="o", color="orange")
+        axes[idx, 1].set_title(f"Trajectory {idx+1} - Controls")
+        axes[idx, 1].set_xlabel("Step")
+        axes[idx, 1].set_ylabel("u")
+        axes[idx, 1].grid(True)
+
+        # Cumulative cost
+        axes[idx, 2].step(steps_j, cs, where="post", marker="o", color="green")
+        axes[idx, 2].set_title(f"Trajectory {idx+1} - Cumulative Cost")
+        axes[idx, 2].set_xlabel("Step")
+        axes[idx, 2].set_ylabel("J")
+        axes[idx, 2].grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
 # -----------------------------
 # CLI demo
@@ -203,5 +314,22 @@ if __name__ == "__main__":
     u_step = float(input("Enter step size for u (e.g. 0.5): "))
     N = int(input("Enter number of steps N (e.g. 4): "))
 
-    result = solve_dp(x_step=x_step, u_step=u_step, N=N, T=2.0)
-    export_to_single_csv(result)
+    filename = f"dp_solution_x{x_step}_u{u_step}_N{N}.csv"
+    if os.path.exists(filename):
+        print(f"Found cached solution file {filename}, loading DP result from CSV (no recomputation).")
+        result = load_result_from_csv(filename)
+    else:
+        print("No cached solution found, solving DP...")
+        result = solve_dp(x_step=x_step, u_step=u_step, N=N, T=2.0)
+        export_to_single_csv(result)
+        result = load_result_from_csv(filename)
+
+    while True:
+        x0_str = input("\nEnter initial state x0 (or 'q' to quit): ")
+        if x0_str.lower() == 'q':
+            break
+        try:
+            x0 = float(x0_str)
+            show_trajectories(result, x0)
+        except ValueError:
+            print("Invalid input. Please enter a number or 'q'.")
