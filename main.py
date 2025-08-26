@@ -257,7 +257,7 @@ def reconstruct_trajectories(result, x0):
 # Show trajectories in terminal + plots
 # -----------------------------
 
-def show_trajectories(result, x0):
+def show_trajectories(result, x0, x_step, u_step, N):
     trajectories = reconstruct_trajectories(result, x0)
 
     if not trajectories:
@@ -269,7 +269,10 @@ def show_trajectories(result, x0):
     n_traj = len(trajectories)
     fig, axes = plt.subplots(n_traj, 3, figsize=(12, 4 * n_traj))
     
-    fig.suptitle(f"Δx={result['x_step']}, Δu={result['u_step']}, N={result['N']}", fontsize=14, fontweight='bold', y=1.02)
+    plt.subplots_adjust(top=0.85)
+    
+    fig.suptitle(f"x0={x0}, Δx={x_step}, Δu={u_step}, N={N}",
+             fontsize=14, fontweight='bold')
 
     if n_traj == 1:
         axes = np.array([axes])  # ensure axes is 2D
@@ -332,6 +335,7 @@ if __name__ == "__main__":
             break
         try:
             x0 = float(x0_str)
-            show_trajectories(result, x0)
+            show_trajectories(result, x0, x_step, u_step, N)
+
         except ValueError:
             print("Invalid input. Please enter a number or 'q'.")
