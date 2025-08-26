@@ -24,19 +24,18 @@ def make_time_grid(N, T=2.0):
     return k_grid, dt
 
 # -----------------------------
-# Problem-specific ingredients (given by user)
+# Problem-specific ingredients
 # -----------------------------
 
 def build_x_index(x_vals, tol=1e-9):
     return {round(float(v), 10): i for i, v in enumerate(x_vals)}
 
 
-def valid_next_index(x, u, x_index_map, x_min=0.0, x_max=1.5):
-    x_next = round(float(x + u), 10)
-    if x_next < x_min - 1e-12 or x_next > x_max + 1e-12:
-        return None, None
-    i_next = x_index_map.get(x_next, None)
-    return x_next, i_next
+def find_bracketing_indices(x_next, x_vals):
+    for j in range(len(x_vals) - 1):
+        if x_vals[j] < x_next < x_vals[j + 1]:
+            return j, j + 1
+    return None, None
 
 # Costs
 
@@ -54,12 +53,11 @@ def terminal_step_cost(x_next, u_last):
 def solve_dp(x_step=0.5, u_step=0.5, N=2, T=2.0):
     x_vals, u_vals = discretize_spaces(x_step, u_step)
     k_grid, dt = make_time_grid(N, T)
-    nx, nu = len(x_vals), len(u_vals)
 
     x_index_map = build_x_index(x_vals)
 
-    J = np.full((N, nx), np.inf)
-    pi = np.full((N, nx), -1, dtype=int)
+    J = np.full((N, len(x_vals)), np.inf)
+    pi = [[[] for _ in range(len(x_vals))] for _ in range(N)]
 
     step_details = [defaultdict(list) for _ in range(N)]
 
@@ -68,51 +66,75 @@ def solve_dp(x_step=0.5, u_step=0.5, N=2, T=2.0):
         k = N - 1
         for i, x in enumerate(x_vals):
             best_cost = np.inf
-            best_u_idx = -1
             for uj, u in enumerate(u_vals):
-                x_next, i_next = valid_next_index(x, u, x_index_map)
-                if i_next is None:
+                x_next = round(float(x + u), 10)
+                if x_next < 0.0 - 1e-12 or x_next > 1.5 + 1e-12:
                     continue
+
+                interpolated = False
+                if x_next in x_index_map:
+                    next_cost = 0.0
+                else:
+                    j_low, j_up = find_bracketing_indices(x_next, x_vals)
+                    if j_low is None:
+                        continue
+                    next_cost = 0.5 * (J[k, j_up] + J[k, j_low])  # placeholder, not used in terminal but for consistency
+                    interpolated = True
+
                 total = terminal_step_cost(x_next, u)
                 step_details[k][i].append({
                     'u': float(u),
                     'x_next': float(x_next),
                     'immediate_cost': float((x_next ** 2) + 2.0 * (u ** 2)),
-                    'next_cost': 0.0,
+                    'next_cost': float(0.0),
                     'total_cost': float(total),
+                    'interpolated': interpolated
                 })
                 if total < best_cost - 1e-12:
                     best_cost = total
-                    best_u_idx = uj
-            if best_u_idx != -1:
-                J[k, i] = best_cost
-                pi[k, i] = best_u_idx
+                    J[k, i] = best_cost
+                    pi[k][i] = [uj]
+                elif abs(total - best_cost) <= 1e-12:
+                    pi[k][i].append(uj)
 
     # Previous steps
     for k in range(N - 2, -1, -1):
         for i, x in enumerate(x_vals):
             best_cost = np.inf
-            best_u_idx = -1
             for uj, u in enumerate(u_vals):
-                x_next, i_next = valid_next_index(x, u, x_index_map)
-                if i_next is None:
+                x_next = round(float(x + u), 10)
+                if x_next < 0.0 - 1e-12 or x_next > 1.5 + 1e-12:
                     continue
+
+                interpolated = False
+                if x_next in x_index_map:
+                    i_next = x_index_map[x_next]
+                    next_c = J[k + 1, i_next]
+                else:
+                    j_low, j_up = find_bracketing_indices(x_next, x_vals)
+                    if j_low is None:
+                        continue
+                    next_c = J[k + 1, j_low] + 0.5 * (J[k + 1, j_up] - J[k + 1, j_low])
+                    interpolated = True
+
                 immediate = stage_cost(u)
-                next_c = J[k + 1, i_next]
                 total = immediate + next_c
+
                 step_details[k][i].append({
                     'u': float(u),
                     'x_next': float(x_next),
                     'immediate_cost': float(immediate),
                     'next_cost': float(next_c),
                     'total_cost': float(total),
+                    'interpolated': interpolated
                 })
+
                 if total < best_cost - 1e-12:
                     best_cost = total
-                    best_u_idx = uj
-            if best_u_idx != -1:
-                J[k, i] = best_cost
-                pi[k, i] = best_u_idx
+                    J[k, i] = best_cost
+                    pi[k][i] = [uj]
+                elif abs(total - best_cost) <= 1e-12:
+                    pi[k][i].append(uj)
 
     return {
         'x_vals': x_vals,
@@ -123,34 +145,42 @@ def solve_dp(x_step=0.5, u_step=0.5, N=2, T=2.0):
         'J': J,
         'pi': pi,
         'details': step_details,
+        'x_step': x_step,
+        'u_step': u_step,
     }
 
 # -----------------------------
 # Export all steps into a single CSV
 # -----------------------------
 
-def export_to_single_csv(result, filename="dp_solution.csv"):
+def export_to_single_csv(result):
     x_vals = result['x_vals']
     u_vals = result['u_vals']
     J = result['J']
     pi = result['pi']
     details = result['details']
     N = result['N']
+    x_step = result['x_step']
+    u_step = result['u_step']
+
+    filename = f"dp_solution_x{x_step}_u{u_step}_N{N}.csv"
 
     with open(filename, mode='w', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(["Step", "x", "u", "x_next", "immediate_cost", "next_cost", "total_cost", "j*", "u*"])
+        writer.writerow(["Step", "x", "u", "x_next", "immediate_cost", "next_cost", "total_cost", "j*", "u*", "interpolated"])
 
         for k in range(N - 1, -1, -1):
             for i, x in enumerate(x_vals):
                 opts = details[k].get(i, [])
                 jstar = J[k, i]
-                u_idx = pi[k, i]
-                ustar = u_vals[u_idx] if u_idx >= 0 else None
+                ustar_idxs = pi[k][i]
+                ustar_vals = [u_vals[idx] for idx in ustar_idxs]
+
                 if not opts:
-                    writer.writerow([k, x, None, None, None, None, None, jstar, ustar])
+                    writer.writerow([k, x, None, None, None, None, None, jstar, "|".join(map(str, ustar_vals)), "no"])
                 else:
                     for o in opts:
+                        optimal_flag = "yes" if abs(o['total_cost'] - jstar) <= 1e-12 else "no"
                         writer.writerow([
                             k,
                             x,
@@ -160,7 +190,8 @@ def export_to_single_csv(result, filename="dp_solution.csv"):
                             o['next_cost'],
                             o['total_cost'],
                             jstar,
-                            ustar
+                            o['u'] if optimal_flag == "yes" else "",
+                            "yes" if o['interpolated'] else "no"
                         ])
     print(f"All steps exported to {filename}")
 
@@ -173,4 +204,4 @@ if __name__ == "__main__":
     N = int(input("Enter number of steps N (e.g. 4): "))
 
     result = solve_dp(x_step=x_step, u_step=u_step, N=N, T=2.0)
-    export_to_single_csv(result, filename="dp_solution.csv")
+    export_to_single_csv(result)
