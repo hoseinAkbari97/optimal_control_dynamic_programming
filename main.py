@@ -268,6 +268,8 @@ def show_trajectories(result, x0):
 
     n_traj = len(trajectories)
     fig, axes = plt.subplots(n_traj, 3, figsize=(12, 4 * n_traj))
+    
+    fig.suptitle(f"Δx={result['x_step']}, Δu={result['u_step']}, N={result['N']}", fontsize=14, fontweight='bold', y=1.02)
 
     if n_traj == 1:
         axes = np.array([axes])  # ensure axes is 2D
