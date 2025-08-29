@@ -196,6 +196,36 @@ def export_to_single_csv(result):
     return filename
 
 # -----------------------------
+# Interpolation helper for J
+# -----------------------------
+
+def interpolate_J(J, x_vals, k, x, simple_average=True):
+    """
+    Return J[k, x] even if x is off-grid.
+    """
+    x = round(float(x), 10)
+    if k >= J.shape[0]:
+        return 0.0
+
+    for i, xv in enumerate(x_vals):
+        if abs(x - xv) <= 1e-10:
+            return float(J[k, i])
+
+    if x < x_vals[0] - 1e-12 or x > x_vals[-1] + 1e-12:
+        return np.inf
+
+    idx_up = np.searchsorted(x_vals, x)
+    j_low, j_up = idx_up - 1, idx_up
+
+    if simple_average:
+        w = 0.5
+    else:
+        denom = (x_vals[j_up] - x_vals[j_low])
+        w = 0.0 if abs(denom) < 1e-15 else float((x - x_vals[j_low]) / denom)
+
+    return (1.0 - w) * float(J[k, j_low]) + w * float(J[k, j_up])
+
+# -----------------------------
 # Load result from CSV
 # -----------------------------
 
@@ -205,59 +235,100 @@ def load_result_from_csv(filename):
         rows = list(reader)
 
     N = max(int(r["Step"]) for r in rows) + 1
-    x_vals = sorted(set(float(r["x"]) for r in rows if r["x"] != ''))
-    u_vals = sorted(set(float(r["u"]) for r in rows if r["u"] not in (None, '', 'None')))
+    x_vals = np.array(sorted({float(r["x"]) for r in rows if r["x"] not in ('', 'None')}))
+    u_vals = np.array(sorted({float(r["u"]) for r in rows if r["u"] not in (None, '', 'None')}))
+
+    # Build J table from j* column
+    x_index = {round(float(x), 10): i for i, x in enumerate(x_vals)}
+    J = np.full((N, len(x_vals)), np.nan)
+    for r in rows:
+        xs = r.get("x", "")
+        if xs in ('', 'None'):
+            continue
+        k = int(r["Step"])
+        x = round(float(xs), 10)
+        jstar_s = r.get("j*")
+        if jstar_s in (None, '', 'None'):
+            continue
+        jval = float(jstar_s)
+        i = x_index[x]
+        if np.isnan(J[k, i]):
+            J[k, i] = jval
+        else:
+            J[k, i] = min(J[k, i], jval)
+
+    J = np.where(np.isnan(J), np.inf, J)
 
     return {
         "rows": rows,
         "N": N,
-        "x_vals": np.array(x_vals),
-        "u_vals": np.array(u_vals)
+        "x_vals": x_vals,
+        "u_vals": u_vals,
+        "J": J,
     }
 
 # -----------------------------
 # Reconstruct optimal trajectories
 # -----------------------------
 
-def reconstruct_trajectories(result, x0):
+def reconstruct_trajectories(result, x0, tol=1e-12, simple_average=True):
     x_vals = result["x_vals"]
     u_vals = result["u_vals"]
     N = result["N"]
-    rows = result["rows"]
+    J = result.get("J", None)
 
-    x_index_map = build_x_index(x_vals)
+    if J is None:
+        return []
 
-    if round(float(x0), 10) not in x_index_map:
+    x_min, x_max = float(x_vals[0]), float(x_vals[-1])
+
+    if not (x_min - 1e-12 <= x0 <= x_max + 1e-12):
         return []
 
     def recurse(step, x_curr, cost_so_far):
         if step >= N:
             return [([x_curr], [], [cost_so_far])]
 
-        candidates = [r for r in rows if int(r["Step"]) == step and float(r["x"]) == round(float(x_curr), 10)]
-        opt_candidates = [r for r in candidates if r["u*"] not in ('', None)]
+        candidates = []
+        for u in u_vals:
+            x_next = float(round(x_curr + u, 10))
+            if x_next < x_min - 1e-12 or x_next > x_max + 1e-12:
+                continue
 
-        if not opt_candidates:
+            if step == N - 1:
+                inc_cost = terminal_step_cost(x_next, u)
+                eval_cost = inc_cost
+            else:
+                inc_cost = stage_cost(u)
+                next_c = interpolate_J(J, x_vals, step + 1, x_next, simple_average=simple_average)
+                eval_cost = inc_cost + next_c
+
+            candidates.append((eval_cost, inc_cost, u, x_next))
+
+        if not candidates:
             return []
 
-        trajectories = []
-        for r in opt_candidates:
-            u = float(r["u*"])
-            x_next = float(r["x_next"])
-            immediate = float(r["immediate_cost"])
-            total_cost = cost_so_far + immediate
-            suffixes = recurse(step + 1, x_next, total_cost)
-            for xs, us, cs in suffixes:
-                trajectories.append(([x_curr] + xs, [u] + us, [cost_so_far] + cs))
-        return trajectories
+        best = min(c[0] for c in candidates)
 
-    return recurse(0, x0, 0.0)
+        trajs = []
+        for eval_cost, inc_cost, u, x_next in candidates:
+            if abs(eval_cost - best) <= tol:
+                suffixes = recurse(step + 1, x_next, cost_so_far + inc_cost)
+                for xs, us, cs in suffixes:
+                    trajs.append(([x_curr] + xs, [u] + us, [cost_so_far] + cs))
+        return trajs
+
+    return recurse(0, float(x0), 0.0)
 
 # -----------------------------
 # Show trajectories in terminal + plots
 # -----------------------------
 
-def show_trajectories(result, x0, x_step, u_step, N):
+# -----------------------------
+# Show trajectories in terminal + plots
+# -----------------------------
+
+def show_trajectories(result, x0):
     trajectories = reconstruct_trajectories(result, x0)
 
     if not trajectories:
@@ -265,17 +336,6 @@ def show_trajectories(result, x0, x_step, u_step, N):
         return
 
     print(f"\nOptimal trajectories starting from x0={x0}:\n")
-
-    n_traj = len(trajectories)
-    fig, axes = plt.subplots(n_traj, 3, figsize=(12, 4 * n_traj))
-    
-    plt.subplots_adjust(top=0.85)
-    
-    fig.suptitle(f"x0={x0}, Δx={x_step}, Δu={u_step}, N={N}",
-             fontsize=14, fontweight='bold')
-
-    if n_traj == 1:
-        axes = np.array([axes])  # ensure axes is 2D
 
     for idx, (xs, us, cs) in enumerate(trajectories):
         print(f"Trajectory {idx+1}:")
@@ -287,29 +347,33 @@ def show_trajectories(result, x0, x_step, u_step, N):
         steps_u = list(range(len(us)))
         steps_j = list(range(len(cs)))
 
-        # X trajectory (step plot)
-        axes[idx, 0].step(steps_x, xs, where="post", marker="o")
-        axes[idx, 0].set_title(f"Trajectory {idx+1} - States")
-        axes[idx, 0].set_xlabel("Step")
-        axes[idx, 0].set_ylabel("x")
-        axes[idx, 0].grid(True)
+        # Plot states
+        plt.figure(figsize=(6,4))
+        plt.step(steps_x, xs, where="post", marker="o")
+        plt.title(f"Trajectory {idx+1} - States")
+        plt.xlabel("Step")
+        plt.ylabel("x")
+        plt.grid(True)
+        plt.show()
 
-        # U trajectory (step plot)
-        axes[idx, 1].step(steps_u, us, where="post", marker="o", color="orange")
-        axes[idx, 1].set_title(f"Trajectory {idx+1} - Controls")
-        axes[idx, 1].set_xlabel("Step")
-        axes[idx, 1].set_ylabel("u")
-        axes[idx, 1].grid(True)
+        # Plot controls
+        plt.figure(figsize=(6,4))
+        plt.step(steps_u, us, where="post", marker="o", color="orange")
+        plt.title(f"Trajectory {idx+1} - Controls")
+        plt.xlabel("Step")
+        plt.ylabel("u")
+        plt.grid(True)
+        plt.show()
 
-        # Cumulative cost
-        axes[idx, 2].step(steps_j, cs, where="post", marker="o", color="green")
-        axes[idx, 2].set_title(f"Trajectory {idx+1} - Cumulative Cost")
-        axes[idx, 2].set_xlabel("Step")
-        axes[idx, 2].set_ylabel("J")
-        axes[idx, 2].grid(True)
+        # Plot cumulative cost
+        plt.figure(figsize=(6,4))
+        plt.step(steps_j, cs, where="post", marker="o", color="green")
+        plt.title(f"Trajectory {idx+1} - Cumulative Cost")
+        plt.xlabel("Step")
+        plt.ylabel("J")
+        plt.grid(True)
+        plt.show()
 
-    plt.tight_layout()
-    plt.show()
 
 # -----------------------------
 # CLI demo
@@ -335,7 +399,6 @@ if __name__ == "__main__":
             break
         try:
             x0 = float(x0_str)
-            show_trajectories(result, x0, x_step, u_step, N)
-
+            show_trajectories(result, x0)
         except ValueError:
             print("Invalid input. Please enter a number or 'q'.")
