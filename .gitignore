@@ -2,3 +2,6 @@
 *.csv
 .vscode
 *.png
+*.docx
+*.pdf
+*.tmp
